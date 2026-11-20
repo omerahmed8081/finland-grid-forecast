@@ -8,6 +8,10 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/.user.yml
 data/
 *.duckdb
 *.duckdb.wal

@@ -1,0 +1,22 @@
+name: gridcast
+version: '1.0.0'
+config-version: 2
+profile: gridcast
+
+model-paths: [models]
+seed-paths: [seeds]
+test-paths: [tests]
+clean-targets: [target, dbt_packages]
+
+models:
+  gridcast:
+    staging:
+      +schema: staging
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table
+
+seeds:
+  gridcast:
+    +schema: staging

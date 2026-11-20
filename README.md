@@ -25,6 +25,28 @@ flowchart LR
     Ingest --> DuckDB["DuckDB raw schema"]
 ```
 
+## M2 transformations
+
+The dbt project cleans and deduplicates the Fingrid 15-minute rows, rolls them
+up to UTC hours, stages FMI observations, and builds `marts.features`. The mart
+includes consumption lags (24, 48, and 168 hours), trailing 24- and 168-hour
+means, Helsinki calendar fields, Finnish public holidays, population-weighted
+temperature observed 24 hours before each feature hour, and heating degree
+hours. The weather lag is available at forecast time and avoids using future
+observations. Population weights use Statistics Finland's 2025 municipal
+population counts. Finnish holidays are generated through 2040 by the `holidays`
+package when transforms run.
+
+The raw history contains one missing consumption hour (2024-06-03 08:00 UTC).
+The feature mart carries forward the last known target for that one hour and
+sets `consumption_imputed` so downstream work can identify it. No future value
+is used for this fill. The DST feature identifies Helsinki's UTC+3 hours; all
+model timestamps remain UTC.
+
+Run `make transform` to generate the dbt seeds and build the staging and mart
+models. Run `dbt test --project-dir dbt --profiles-dir dbt` for the data checks.
+Set `GRIDCAST_DATABASE_PATH` to override the default `data/gridcast.duckdb`.
+
 ## Run ingestion
 
 Use Python 3.11 or newer. Install the project and development tools, then copy `.env.example` to `.env` and set `FINGRID_API_KEY` to a registered Fingrid Open Data API key.

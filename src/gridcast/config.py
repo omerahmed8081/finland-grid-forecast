@@ -29,6 +29,18 @@ FMI_PLACES = ("helsinki", "tampere", "turku", "oulu", "jyvaskyla")
 FMI_CHUNK_DAYS = 7
 FMI_REQUEST_WORKERS = 4
 
+# 2025 population counts for the five weather-weighted municipalities.
+# Statistics Finland, Finland in Figures population tables:
+# https://stat.fi/fi/tilastot/tietoa-teemoittain/suomi-lukuina/vaesto-ja-yhteiskunta
+WEATHER_PLACE_POPULATIONS = {
+    "helsinki": 694_392,
+    "tampere": 263_337,
+    "turku": 209_633,
+    "oulu": 217_469,
+    "jyvaskyla": 149_895,
+}
+WEATHER_POPULATION_REFERENCE_YEAR = 2025
+
 HISTORY_YEARS = 3
 INGESTION_CHUNK_DAYS = 180
 HTTP_TIMEOUT_SECONDS = 60

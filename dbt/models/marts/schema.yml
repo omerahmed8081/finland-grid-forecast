@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: features
+    description: >-
+      UTC hourly consumption with calendar values in Europe/Helsinki and weather
+      observed 24 hours earlier. A single missing raw hour is carried forward
+      and marked in consumption_imputed so no future target is used to fill it.
+    columns:
+      - name: hour_utc
+        data_tests: [not_null, unique]
+      - name: consumption_mwh
+        data_tests: [not_null]
+      - name: consumption_imputed
+        data_tests: [not_null]

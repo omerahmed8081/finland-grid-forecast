@@ -1,0 +1,7 @@
+gridcast:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: "{{ env_var('GRIDCAST_DATABASE_PATH', 'data/gridcast.duckdb') }}"
+      threads: 4

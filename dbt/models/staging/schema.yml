@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: stg_fingrid_15m
+    columns:
+      - name: interval_start_utc
+        data_tests: [not_null]
+      - name: interval_end_utc
+        data_tests: [not_null]
+  - name: stg_consumption_hourly
+    columns:
+      - name: hour_utc
+        data_tests: [not_null, unique]
+  - name: stg_fmi_weather_hourly
+    columns:
+      - name: hour_utc
+        data_tests: [not_null]
+      - name: place
+        data_tests: [not_null]
