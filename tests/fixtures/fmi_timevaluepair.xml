@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<wfs:FeatureCollection
+  xmlns:wfs="http://www.opengis.net/wfs/2.0"
+  xmlns:omso="http://inspire.ec.europa.eu/schemas/omso/3.0"
+  xmlns:om="http://www.opengis.net/om/2.0"
+  xmlns:wml2="http://www.opengis.net/waterml/2.0"
+  xmlns:gml="http://www.opengis.net/gml/3.2">
+  <wfs:member>
+    <omso:PointTimeSeriesObservation>
+      <gml:name>Helsinki Kaisaniemi</gml:name>
+      <om:result>
+        <wml2:MeasurementTimeseries>
+          <wml2:point>
+            <wml2:MeasurementTVP>
+              <wml2:time>2024-01-01T00:00:00Z</wml2:time>
+              <wml2:value>-5.2</wml2:value>
+            </wml2:MeasurementTVP>
+          </wml2:point>
+          <wml2:point>
+            <wml2:MeasurementTVP>
+              <wml2:time>2024-01-01T01:00:00Z</wml2:time>
+              <wml2:value>-4.8</wml2:value>
+            </wml2:MeasurementTVP>
+          </wml2:point>
+        </wml2:MeasurementTimeseries>
+      </om:result>
+    </omso:PointTimeSeriesObservation>
+  </wfs:member>
+  <wfs:member>
+    <omso:PointTimeSeriesObservation>
+      <gml:name>Tampere Siilinkari</gml:name>
+      <om:result>
+        <wml2:MeasurementTimeseries>
+          <wml2:point>
+            <wml2:MeasurementTVP>
+              <wml2:time>2024-01-01T00:00:00Z</wml2:time>
+              <wml2:value>-6.1</wml2:value>
+            </wml2:MeasurementTVP>
+          </wml2:point>
+          <wml2:point>
+            <wml2:MeasurementTVP>
+              <wml2:time>2024-01-01T01:00:00Z</wml2:time>
+              <wml2:value>-5.7</wml2:value>
+            </wml2:MeasurementTVP>
+          </wml2:point>
+        </wml2:MeasurementTimeseries>
+      </om:result>
+    </omso:PointTimeSeriesObservation>
+  </wfs:member>
+</wfs:FeatureCollection>
