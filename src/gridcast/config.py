@@ -12,6 +12,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Dataset 124 is Fingrid's "Electricity consumption in Finland" series:
 # https://data.fingrid.fi/en/datasets/124
 FINGRID_DATASET_ID = 124
+# Daily-ahead national consumption forecast, published for the following day:
+# https://data.fingrid.fi/en/datasets/165
+FINGRID_CONSUMPTION_FORECAST_DATASET_ID = 165
 # The GetDatasetData operation is documented in Fingrid's developer portal:
 # https://developer-data.fingrid.fi/api-details#api=avoindata-api&operation=GetDatasetData
 FINGRID_API_BASE_URL = "https://data.fingrid.fi/api"

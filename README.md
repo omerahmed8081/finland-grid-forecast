@@ -72,7 +72,10 @@ The local pre-commit hooks use the same Ruff checks. Install them with `pre-comm
 - All stored timestamps are timezone-aware UTC timestamps. Helsinki time is reserved for calendar features and display work in later milestones.
 - Fingrid dataset 124 is the official consumption dataset. Its API coverage is recorded separately from returned measurements so empty periods are not repeatedly downloaded.
 - FMI observations use the official `fmi::observations::weather::timevaluepair` WFS stored query with hourly `t2m` observations for Helsinki, Tampere, Turku, Oulu, and Jyväskylä. Requests cover one week (the service limit) and ask for all five places together.
-- Transformations, forecasting, serving, and the dashboard have not been started; they belong to later milestones.
+- M3 uses hourly origin-safe examples: each 13:00 Helsinki origin predicts the following local day using the prior week's same-hour consumption, the 24-hour consumption average known at issue time, target calendar fields, and only temperature observed by issue time. Target-relative rolling features are not used for the 24-hour forecast because late forecast hours would expose future observations. The 13:00 issue time follows Fingrid's daily forecast publication.
+- Fingrid's official next-day consumption forecast is dataset 165 (catalogue: https://data.fingrid.fi/en/datasets/165). The backtest compares forecast rows aligned by UTC delivery hour.
+- The frozen 12-month holdout (2025-11-20 onward) reported 470.2 MAE / 636.4 RMSE / 4.45% MAPE for LightGBM, 681.7 / 915.5 / 6.57% for seasonal naive, and 327.3 / 425.3 / 3.24% for Fingrid. Fingrid outperformed this first model; no claim is made that the model beats Fingrid. See `reports/backtest.md` for per-hour and per-month errors and plots.
+- M4 API and dashboard are the next milestone.
 
 ## Data credits
 
