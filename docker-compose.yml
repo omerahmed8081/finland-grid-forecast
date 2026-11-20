@@ -1,0 +1,22 @@
+services:
+  api:
+    build: .
+    command: uvicorn gridcast.api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      GRIDCAST_DATABASE_PATH: /app/data/gridcast.duckdb
+      FINGRID_API_KEY: ${FINGRID_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+  dashboard:
+    build: .
+    command: streamlit run dashboard/app.py --server.address 0.0.0.0 --server.port 8501
+    environment:
+      GRIDCAST_DATABASE_PATH: /app/data/gridcast.duckdb
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api

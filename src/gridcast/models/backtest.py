@@ -1,12 +1,14 @@
 """Forecast-origin-aligned LightGBM backtest and MLflow logging."""
+# ruff: noqa: E501
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
+import joblib
 import matplotlib.pyplot as plt
 import mlflow
 import pandas as pd
@@ -16,6 +18,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from gridcast.config import REPO_ROOT
 
 HELSINKI = ZoneInfo("Europe/Helsinki")
+UTC = timezone.utc  # noqa: UP017
 FEATURES = [
     "seasonal_week",
     "origin_mean_24h",
@@ -109,6 +112,8 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         n_estimators=250, learning_rate=0.04, num_leaves=31, verbosity=-1
     )
     model.fit(training[FEATURES], training.target)
+    (REPO_ROOT / "data").mkdir(exist_ok=True)
+    joblib.dump(model, REPO_ROOT / "data" / "day_ahead_model.joblib")
     scored = build_examples(data, test_first, latest - timedelta(days=1))
     scored = scored.dropna(subset=FEATURES + ["target"]).copy()
     scored["model"] = model.predict(scored[FEATURES])
@@ -124,6 +129,28 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
             raw["hour_utc"] = pd.to_datetime(raw.start_time, utc=True).dt.floor("h")
             hourly = raw.groupby("hour_utc").value.mean()
             scored["fingrid_forecast"] = scored.hour_utc.map(hourly)
+    with duckdb.connect(str(db_path)) as con:
+        con.execute("""create table if not exists forecast_predictions (
+            forecast_origin_utc timestamptz not null, target_hour_utc timestamptz not null,
+            model_mwh double, seasonal_naive_mwh double, fingrid_mwh double,
+            primary key (forecast_origin_utc, target_hour_utc))""")
+        for row in scored.itertuples(index=False):
+            local_target = row.hour_utc.to_pydatetime().astimezone(HELSINKI)
+            origin = datetime.combine(
+                local_target.date() - timedelta(days=1), time(13), tzinfo=HELSINKI
+            )
+            con.execute(
+                """insert into forecast_predictions values (?, ?, ?, ?, ?)
+                on conflict do update set model_mwh=excluded.model_mwh,
+                seasonal_naive_mwh=excluded.seasonal_naive_mwh, fingrid_mwh=excluded.fingrid_mwh""",
+                [
+                    origin.astimezone(UTC),
+                    row.hour_utc.to_pydatetime(),
+                    row.model,
+                    row.seasonal_naive,
+                    None if pd.isna(row.fingrid_forecast) else row.fingrid_forecast,
+                ],
+            )
     report_dir = REPO_ROOT / "reports"
     report_dir.mkdir(exist_ok=True)
     mlflow.set_tracking_uri(

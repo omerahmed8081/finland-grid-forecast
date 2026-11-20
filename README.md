@@ -75,7 +75,12 @@ The local pre-commit hooks use the same Ruff checks. Install them with `pre-comm
 - M3 uses hourly origin-safe examples: each 13:00 Helsinki origin predicts the following local day using the prior week's same-hour consumption, the 24-hour consumption average known at issue time, target calendar fields, and only temperature observed by issue time. Target-relative rolling features are not used for the 24-hour forecast because late forecast hours would expose future observations. The 13:00 issue time follows Fingrid's daily forecast publication.
 - Fingrid's official next-day consumption forecast is dataset 165 (catalogue: https://data.fingrid.fi/en/datasets/165). The backtest compares forecast rows aligned by UTC delivery hour.
 - The frozen 12-month holdout (2025-11-20 onward) reported 470.2 MAE / 636.4 RMSE / 4.45% MAPE for LightGBM, 681.7 / 915.5 / 6.57% for seasonal naive, and 327.3 / 425.3 / 3.24% for Fingrid. Fingrid outperformed this first model; no claim is made that the model beats Fingrid. See `reports/backtest.md` for per-hour and per-month errors and plots.
-- M4 API and dashboard are the next milestone.
+
+## M4 API and dashboard
+
+Run `make serve` for the FastAPI service (`/health`, `/forecast?date=YYYY-MM-DD`, `/metrics`) and `make dashboard` for Streamlit. The dashboard's Generate button and the API's next-day forecast endpoint use the saved M3 model. Both read and write `forecast_predictions` in the same DuckDB file; set `GRIDCAST_DATABASE_PATH` to change it. Forecast request dates are Helsinki calendar dates, while returned timestamps and stored keys are UTC.
+
+Run `make train` once to create the model artifact, then start both services with `docker compose up --build`; the local `data/` directory is mounted into both containers. Set `FINGRID_API_KEY` in `.env` for forecast comparison refreshes. The dashboard compares tomorrow's model forecast with Fingrid's dataset 165, plots the last 30 days of actual and stored forecast values, and reports rolling MAE/MAPE when matching predictions exist. It credits Fingrid and FMI on the page.
 
 ## Data credits
 

@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: install ingest transform train backtest lint test
+.PHONY: install ingest transform train backtest serve dashboard lint test
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -17,6 +17,12 @@ train:
 
 backtest:
 	$(PYTHON) -m gridcast.models.backtest
+
+serve:
+	uvicorn gridcast.api.main:app --host 0.0.0.0 --port 8000
+
+dashboard:
+	streamlit run dashboard/app.py
 
 lint:
 	ruff check .
