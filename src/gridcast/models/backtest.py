@@ -149,13 +149,51 @@ def build_examples(data: pd.DataFrame, first: date, last: date) -> pd.DataFrame:
     return pd.concat(examples, ignore_index=True)
 
 
+def choose_non_worse_correction_scale(
+    actual: pd.Series,
+    fingrid_forecast: pd.Series,
+    residual_estimate: pd.Series,
+) -> tuple[float, tuple[float, float, float], tuple[float, float, float]]:
+    """Select residual scale with validation MAE, RMSE, and MAPE no worse than raw."""
+    raw_metrics = _forecast_metrics(actual, fingrid_forecast)
+    best_scale = 0.0
+    best_metrics = raw_metrics
+    for step in range(1, 21):
+        scale = step / 20
+        corrected_metrics = _forecast_metrics(
+            actual, fingrid_forecast + scale * residual_estimate
+        )
+        no_worse = all(
+            candidate <= raw + 1e-9
+            for raw, candidate in zip(raw_metrics, corrected_metrics)
+        )
+        if no_worse and corrected_metrics[0] < best_metrics[0]:
+            best_scale = scale
+            best_metrics = corrected_metrics
+    return best_scale, raw_metrics, best_metrics
+
+
+def _forecast_metrics(
+    actual: pd.Series, predicted: pd.Series
+) -> tuple[float, float, float]:
+    """Calculate MAE, RMSE, and MAPE for an aligned forecast series."""
+    return (
+        mean_absolute_error(actual, predicted),
+        mean_squared_error(actual, predicted) ** 0.5,
+        (abs((actual - predicted) / actual).mean()) * 100,
+    )
+
+
 def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path:
     """Train before a 12-month holdout and score 13:00 next-day forecasts."""
     data = load_data(db_path)
-    latest = data.index.max().date()
-    test_first = latest - timedelta(days=365)
+    latest = data.index.max().tz_convert(HELSINKI).date()
+    test_first = latest - timedelta(days=364)
+    training_target_first = test_first - timedelta(days=730)
     training = build_examples(
-        data, test_first - timedelta(days=730), test_first - timedelta(days=1)
+        data,
+        training_target_first - timedelta(days=1),
+        test_first - timedelta(days=2),
     )
     training = training.dropna(subset=FEATURES + ["target"])
     model = LGBMRegressor(
@@ -164,7 +202,9 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
     model.fit(training[FEATURES], training.target)
     (REPO_ROOT / "data").mkdir(exist_ok=True)
     joblib.dump(model, REPO_ROOT / "data" / "day_ahead_model.joblib")
-    scored = build_examples(data, test_first, latest - timedelta(days=1))
+    scored = build_examples(
+        data, test_first - timedelta(days=1), latest - timedelta(days=1)
+    )
     scored = scored.dropna(subset=FEATURES + ["target"]).copy()
     scored["model"] = model.predict(scored[FEATURES])
     oracle_training = training.dropna(subset=ORACLE_FEATURES + ["target"])
@@ -181,7 +221,46 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
     correction_features = [*FEATURES, "fingrid_forecast"]
     correction_train = training.dropna(subset=correction_features + ["target"]).copy()
     scored["fingrid_corrected"] = float("nan")
-    if len(correction_train) >= 72:
+    validation_start = test_first - timedelta(days=180)
+    validation_start_utc = pd.Timestamp(
+        datetime.combine(validation_start, time.min, tzinfo=HELSINKI)
+    ).tz_convert("UTC")
+    development = correction_train.loc[
+        correction_train.hour_utc < validation_start_utc
+    ].copy()
+    validation = correction_train.loc[
+        correction_train.hour_utc >= validation_start_utc
+    ].copy()
+    validation_results: dict[str, float] = {}
+    correction_scale = 0.0
+    if len(development) >= 72 and not validation.empty:
+        validation_model = make_pipeline(StandardScaler(), Ridge(alpha=50.0))
+        development["fingrid_error"] = development.target - development.fingrid_forecast
+        validation_model.fit(
+            development[correction_features], development.fingrid_error
+        )
+        validation_residuals = pd.Series(
+            validation_model.predict(validation[correction_features]),
+            index=validation.index,
+        )
+        (
+            correction_scale,
+            validation_raw_metrics,
+            validation_corrected_metrics,
+        ) = choose_non_worse_correction_scale(
+            validation.target,
+            validation.fingrid_forecast,
+            validation_residuals,
+        )
+        validation_results = {
+            "raw_mae": validation_raw_metrics[0],
+            "raw_rmse": validation_raw_metrics[1],
+            "raw_mape": validation_raw_metrics[2],
+            "corrected_mae": validation_corrected_metrics[0],
+            "corrected_rmse": validation_corrected_metrics[1],
+            "corrected_mape": validation_corrected_metrics[2],
+            "rows": float(len(validation)),
+        }
         correction = make_pipeline(StandardScaler(), Ridge(alpha=50.0))
         correction_train["fingrid_error"] = (
             correction_train.target - correction_train.fingrid_forecast
@@ -192,7 +271,7 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         available = scored.dropna(subset=correction_features)
         scored.loc[available.index, "fingrid_corrected"] = (
             available.fingrid_forecast
-            + correction.predict(available[correction_features])
+            + correction_scale * correction.predict(available[correction_features])
         )
     with duckdb.connect(str(db_path)) as con:
         con.execute("""create table if not exists forecast_predictions (
@@ -229,6 +308,9 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
                 "holdout_days": 365,
                 "issue_time": "13:00 Europe/Helsinki",
                 "fingrid_error_training_rows": len(correction_train),
+                "fingrid_error_development_rows": len(development),
+                "fingrid_error_validation_rows": len(validation),
+                "fingrid_error_correction_scale": correction_scale,
             }
         )
         mlflow.lightgbm.log_model(model, "model")
@@ -247,8 +329,24 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         mlflow.log_artifact(str(report_dir / "feature_importance.png"))
         plt.close(ax.get_figure())
         mlflow.lightgbm.log_model(oracle, "oracle_upper_bound_model")
-        if len(correction_train) >= 72:
+        if validation_results:
             mlflow.sklearn.log_model(correction, "fingrid_error_correction_model")
+            mlflow.log_metrics(
+                {
+                    "fingrid_validation_raw_mae": validation_results["raw_mae"],
+                    "fingrid_validation_raw_rmse": validation_results["raw_rmse"],
+                    "fingrid_validation_raw_mape": validation_results["raw_mape"],
+                    "fingrid_validation_corrected_mae": validation_results[
+                        "corrected_mae"
+                    ],
+                    "fingrid_validation_corrected_rmse": validation_results[
+                        "corrected_rmse"
+                    ],
+                    "fingrid_validation_corrected_mape": validation_results[
+                        "corrected_mape"
+                    ],
+                }
+            )
         for name in [
             "model",
             "oracle_upper_bound",
@@ -318,16 +416,32 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         "The oracle row uses observed target-day weather as a hypothetical "
         "upper-bound scenario; it is not a deployable forecast or a guarantee "
         "that forecast weather alone could achieve the same score.",
-        f"Fingrid error correction is a separate Ridge residual model calibrated on {len(correction_train)} pre-holdout forecast hours; its short calibration period limits confidence.",
+        f"Fingrid error correction is a separate Ridge residual model retrained on {len(correction_train)} pre-holdout forecast hours.",
+        (
+            f"Residual scale was selected on the final pre-holdout validation window "
+            f"({validation_start} through {test_first - timedelta(days=1)}; "
+            f"{int(validation_results['rows'])} aligned hours; trained on "
+            f"{len(development)} earlier hours). Validation metrics: "
+            f"raw Fingrid: {validation_results['raw_mae']:.1f} MAE / "
+            f"{validation_results['raw_rmse']:.1f} RMSE / "
+            f"{validation_results['raw_mape']:.2f}% MAPE; corrected: "
+            f"{validation_results['corrected_mae']:.1f} / "
+            f"{validation_results['corrected_rmse']:.1f} / "
+            f"{validation_results['corrected_mape']:.2f}% (scale "
+            f"{correction_scale:.2f}). The scale is selected only from candidates "
+            "no worse on all three metrics, with zero correction as a safe option."
+            if validation_results
+            else "Residual correction validation was unavailable because there were "
+            "not enough aligned pre-holdout rows."
+        ),
         "The primary model uses consumption_lag_48h, the 168-hour mart mean "
         "available at issue time, and heating_degree_hours alongside its existing "
         "features. The 168-hour value is taken from the latest completed mart row "
         "at the origin, so target-day rolling values cannot leak into the forecast.",
-        "Fingrid's published forecast remains stronger than both the primary "
-        "model and the residual correction. Fingrid can use operational inputs "
-        "and forecasting information that are not available in this project; "
-        f"the correction also has only a short {len(correction_train)}-hour "
-        "calibration history.",
+        "Fingrid's raw forecast remains stronger than the leakage-safe primary "
+        "LightGBM on the holdout. The residual correction is a separate model "
+        "that uses historical Fingrid errors; this result does not establish "
+        "that it will outperform Fingrid on future periods.",
         "",
         "The oracle-versus-primary MAE difference measures this model's response "
         "to actual target-day weather; actual weather is not available at issue time. FMI's "

@@ -5,7 +5,11 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from gridcast.models.backtest import FEATURES, make_origin_rows
+from gridcast.models.backtest import (
+    FEATURES,
+    choose_non_worse_correction_scale,
+    make_origin_rows,
+)
 
 
 def _features() -> pd.DataFrame:
@@ -45,3 +49,31 @@ def test_forecast_features_do_not_change_when_future_actuals_change() -> None:
     assert "consumption_lag_48h" in FEATURES
     assert "origin_mean_168h" in FEATURES
     pd.testing.assert_frame_equal(first[FEATURES], second[FEATURES])
+
+
+def test_validation_scale_never_worsens_raw_fingrid_mae() -> None:
+    actual = pd.Series([100.0, 110.0, 120.0])
+    fingrid = pd.Series([105.0, 105.0, 125.0])
+    harmful_residual = pd.Series([40.0, -40.0, 40.0])
+
+    scale, raw_metrics, corrected_metrics = choose_non_worse_correction_scale(
+        actual, fingrid, harmful_residual
+    )
+
+    assert scale == 0.0
+    assert corrected_metrics == raw_metrics
+
+
+def test_validation_scale_uses_helpful_residuals_without_metric_regression() -> None:
+    actual = pd.Series([100.0, 110.0, 120.0, 130.0])
+    fingrid = pd.Series([105.0, 105.0, 125.0, 125.0])
+    residual_estimate = actual - fingrid
+
+    scale, raw_metrics, corrected_metrics = choose_non_worse_correction_scale(
+        actual, fingrid, residual_estimate
+    )
+
+    assert scale > 0.0
+    assert all(
+        corrected <= raw for raw, corrected in zip(raw_metrics, corrected_metrics)
+    )
