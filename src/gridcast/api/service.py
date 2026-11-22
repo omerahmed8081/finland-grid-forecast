@@ -73,13 +73,15 @@ def create_next_day_forecast(db_path: Path | None = None) -> date:
         observed = connection.execute(
             """select hour_utc, consumption_mwh as target,
             hour_of_day as hour, weekday, month, is_finnish_holiday as holiday,
+            consumption_mean_168h, consumption_lag_48h,
             population_weighted_temperature_c temperature
-            from marts.features where hour_utc <= ? order by hour_utc""",
+            from marts.features where hour_utc < ? order by hour_utc""",
             [issue.astimezone(UTC)],
         ).df()
         observed["hour_utc"] = pd.to_datetime(observed.hour_utc, utc=True)
         observed = observed.set_index("hour_utc", drop=False)
         recent = observed.target.tail(24).mean()
+        origin_mean_168 = observed.consumption_mean_168h.dropna().iloc[-1]
         recent_weather = observed.temperature.dropna().iloc[-1]
         holiday_dates = holidays.country_holidays("FI", years=[day.year])
         rows = []
@@ -94,8 +96,25 @@ def create_next_day_forecast(db_path: Path | None = None) -> date:
                 target_local.to_pydatetime() - timedelta(days=7)
             ).tz_convert("UTC")
             seasonal = float(observed.loc[prev_week].target)
+            lag_48 = float(observed.loc[target_utc - pd.Timedelta(hours=48)].target)
             weather_at = target_utc - pd.Timedelta(hours=24)
-            if weather_at <= pd.Timestamp(issue):
+            forecast_table = connection.execute("""select count(*) from information_schema.tables
+                where table_schema='raw' and table_name='fmi_weather_forecasts'""").fetchone()[
+                0
+            ]
+            forecast_temp = None
+            if forecast_table:
+                forecast_temp = connection.execute(
+                    """select sum(f.temperature_c*p.population)/nullif(sum(p.population),0)
+                    from raw.fmi_weather_forecasts f join staging.population_weights p
+                    on lower(f.place)=p.place where f.forecast_for_utc=?
+                    and f.forecast_origin_utc=(select max(forecast_origin_utc)
+                        from raw.fmi_weather_forecasts where forecast_for_utc=?)""",
+                    [target_utc.to_pydatetime(), target_utc.to_pydatetime()],
+                ).fetchone()[0]
+            if forecast_temp is not None:
+                temp = float(forecast_temp)
+            elif weather_at <= pd.Timestamp(issue):
                 temp = connection.execute(
                     """select sum(w.temperature_c*p.population)/nullif(sum(p.population),0)
                     from raw.fmi_weather w join staging.population_weights p on lower(w.place)=p.place
@@ -110,11 +129,14 @@ def create_next_day_forecast(db_path: Path | None = None) -> date:
                     "target_hour_utc": target_utc,
                     "seasonal_week": seasonal,
                     "origin_mean_24h": recent,
+                    "consumption_lag_48h": lag_48,
+                    "origin_mean_168h": origin_mean_168,
                     "hour": target_local.hour,
                     "weekday": target_local.isoweekday(),
                     "month": target_local.month,
                     "holiday": int(target_local.date() in holiday_dates),
                     "temperature": temp,
+                    "heating_degree_hours": max(0.0, 18.0 - temp),
                 }
             )
         frame = pd.DataFrame(rows)

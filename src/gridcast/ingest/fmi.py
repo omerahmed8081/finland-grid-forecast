@@ -8,17 +8,20 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import duckdb
 
 from gridcast.config import (
     FMI_CHUNK_DAYS,
+    FMI_FORECAST_STORED_QUERY,
+    FMI_FORECAST_TEMPERATURE_PARAMETER,
     FMI_HOURLY_TIMESTEP_MINUTES,
     FMI_PLACES,
     FMI_REQUEST_WORKERS,
@@ -55,6 +58,15 @@ class FmiIngestionResult:
 
     rows_written: int
     requests_downloaded: int
+
+
+@dataclass(frozen=True)
+class FmiForecastSnapshotResult:
+    """Summary of an archived next-day FMI forecast snapshot."""
+
+    rows_written: int
+    forecast_date: date
+    downloaded: bool
 
 
 class FmiClient:
@@ -112,6 +124,46 @@ class FmiClient:
             observations=parse_observations(content, places),
             downloaded=downloaded,
         )
+
+    def fetch_forecast_range(
+        self,
+        places: tuple[str, ...],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> FmiFetchResult:
+        """Fetch current HARMONIE forecast values for the requested times."""
+        if not places:
+            raise ValueError("At least one FMI place is required.")
+        params = [
+            ("service", "WFS"),
+            ("version", "2.0.0"),
+            ("request", "GetFeature"),
+            ("storedquery_id", FMI_FORECAST_STORED_QUERY),
+        ]
+        params.extend(("place", place) for place in places)
+        params.extend(
+            [
+                ("parameters", FMI_FORECAST_TEMPERATURE_PARAMETER),
+                ("timestep", str(FMI_HOURLY_TIMESTEP_MINUTES)),
+                ("starttime", _format_utc(start_time)),
+                ("endtime", _format_utc(end_time)),
+            ]
+        )
+        url = f"{self._base_url}?{urlencode(params)}"
+        cache_dir = self._cache_dir / "fmi" / "forecasts"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / _cache_name(places, start_time, end_time)
+        if cache_path.is_file():
+            content = cache_path.read_bytes()
+            downloaded = False
+        else:
+            content = self._request(url)
+            cache_path.write_bytes(content)
+            downloaded = True
+        observations = parse_observations(content, places)
+        for observation in observations:
+            observation["parameter"] = FMI_FORECAST_TEMPERATURE_PARAMETER
+        return FmiFetchResult(observations, downloaded)
 
     def _request(self, url: str) -> bytes:
         """Issue a retrying public FMI WFS request."""
@@ -333,6 +385,52 @@ def ingest_fmi_weather(
                     "FMI backfill requests completed: %d/%d", completed, len(tasks)
                 )
     return FmiIngestionResult(rows_written, requests_downloaded)
+
+
+def snapshot_fmi_next_day_forecast(
+    connection: duckdb.DuckDBPyConnection,
+    client: FmiClient,
+    *,
+    now: datetime | None = None,
+    places: tuple[str, ...] = FMI_PLACES,
+) -> FmiForecastSnapshotResult:
+    """Fetch and persist one vintage of next-local-day forecast temperatures."""
+    issue = datetime.now(UTC) if now is None else now.astimezone(UTC)
+    local_day = issue.astimezone(ZoneInfo("Europe/Helsinki")).date() + timedelta(days=1)
+    start_time = datetime.combine(
+        local_day, datetime.min.time(), ZoneInfo("Europe/Helsinki")
+    ).astimezone(UTC)
+    end_time = datetime.combine(
+        local_day + timedelta(days=1), datetime.min.time(), ZoneInfo("Europe/Helsinki")
+    ).astimezone(UTC)
+    result = client.fetch_forecast_range(places, start_time, end_time)
+    if not result.observations:
+        raise RuntimeError("FMI returned no temperature forecast values for next day.")
+    connection.execute("CREATE SCHEMA IF NOT EXISTS raw")
+    connection.execute("""CREATE TABLE IF NOT EXISTS raw.fmi_weather_forecasts (
+        forecast_origin_utc TIMESTAMPTZ NOT NULL,
+        forecast_for_utc TIMESTAMPTZ NOT NULL,
+        place VARCHAR NOT NULL,
+        temperature_c DOUBLE,
+        parameter VARCHAR NOT NULL,
+        PRIMARY KEY (forecast_origin_utc, forecast_for_utc, place, parameter))""")
+    rows = [
+        (
+            issue,
+            item["observed_at"],
+            item["place"],
+            item["temperature_c"],
+            item["parameter"],
+        )
+        for item in result.observations
+        if start_time <= item["observed_at"] < end_time
+    ]
+    connection.executemany(
+        """INSERT INTO raw.fmi_weather_forecasts VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT DO UPDATE SET temperature_c=excluded.temperature_c""",
+        rows,
+    )
+    return FmiForecastSnapshotResult(len(rows), local_day, result.downloaded)
 
 
 def _store_observations(

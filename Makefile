@@ -1,12 +1,15 @@
 PYTHON ?= python
 
-.PHONY: install ingest transform train backtest serve dashboard lint test
+.PHONY: install ingest forecast-weather transform train backtest serve dashboard lint test
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
 
 ingest:
 	$(PYTHON) -m gridcast.ingest.cli
+
+forecast-weather:
+	$(PYTHON) -m gridcast.ingest.forecast_job
 
 transform:
 	$(PYTHON) -m gridcast.transform.seeds

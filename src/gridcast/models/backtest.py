@@ -13,7 +13,10 @@ import matplotlib.pyplot as plt
 import mlflow
 import pandas as pd
 from lightgbm import LGBMRegressor
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from gridcast.config import REPO_ROOT
 
@@ -21,12 +24,20 @@ HELSINKI = ZoneInfo("Europe/Helsinki")
 UTC = timezone.utc  # noqa: UP017
 FEATURES = [
     "seasonal_week",
+    "consumption_lag_48h",
     "origin_mean_24h",
+    "origin_mean_168h",
     "hour",
     "weekday",
     "month",
     "holiday",
     "temperature",
+    "heating_degree_hours",
+]
+ORACLE_FEATURES = [
+    *FEATURES[:-2],
+    "oracle_temperature",
+    "oracle_heating_degree_hours",
 ]
 
 
@@ -35,17 +46,33 @@ def load_data(db_path: Path) -> pd.DataFrame:
     with duckdb.connect(str(db_path), read_only=True) as con:
         frame = con.execute("""select hour_utc, consumption_mwh as target,
             hour_of_day as hour, weekday, month, is_finnish_holiday as holiday,
-            population_weighted_temperature_c temperature
+            consumption_lag_48h, consumption_mean_168h,
+            population_weighted_temperature_c temperature,
+            heating_degree_hours
             from marts.features order by hour_utc""").df()
     frame["hour_utc"] = pd.to_datetime(frame.hour_utc, utc=True)
-    return frame.set_index("hour_utc", drop=False)
+    frame = frame.set_index("hour_utc", drop=False)
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        exists = con.execute("""select count(*) from information_schema.tables
+            where table_schema='raw' and table_name='fingrid_165'""").fetchone()[0]
+        if exists:
+            forecast = con.execute("""select start_time, avg(value) as value
+                from raw.fingrid_165 group by start_time""").df()
+            forecast["hour_utc"] = pd.to_datetime(
+                forecast.start_time, utc=True
+            ).dt.floor("h")
+            frame.attrs["fingrid"] = forecast.groupby("hour_utc").value.mean()
+    return frame
 
 
 def make_origin_rows(data: pd.DataFrame, origin: datetime) -> pd.DataFrame:
     """Build 24 forecast rows using only target data known at the issue time."""
     origin_ts = pd.Timestamp(origin).tz_convert("UTC")
-    known = data.loc[data.index <= origin_ts]
-    recent = known.loc[known.index > origin_ts - pd.Timedelta(hours=24), "target"]
+    # Consumption stamped at the issue hour covers the hour that is just
+    # beginning, so only rows strictly before the issue are observable.
+    known = data.loc[data.index < origin_ts]
+    recent = known.loc[known.index >= origin_ts - pd.Timedelta(hours=24), "target"]
+    origin_mean_168 = known.iloc[-1].consumption_mean_168h
     known_weather = known.loc[known.temperature.notna(), "temperature"]
     day = origin.astimezone(HELSINKI).date() + timedelta(days=1)
     rows: list[dict[str, object]] = []
@@ -62,6 +89,9 @@ def make_origin_rows(data: pd.DataFrame, origin: datetime) -> pd.DataFrame:
         if target_utc not in data.index or previous_week not in data.index:
             continue
         calendar = data.loc[target_utc]
+        lag_48_time = target_utc - pd.Timedelta(hours=48)
+        if lag_48_time > origin_ts:
+            continue
         weather_time = target_utc - pd.Timedelta(hours=24)
         # marts.features stores temperature shifted forward 24 hours. Its row
         # at t therefore represents weather observed at t-24, when available.
@@ -70,17 +100,37 @@ def make_origin_rows(data: pd.DataFrame, origin: datetime) -> pd.DataFrame:
             if weather_time <= origin_ts
             else (known_weather.iloc[-1] if not known_weather.empty else float("nan"))
         )
+        oracle_row = (
+            data.loc[target_utc + pd.Timedelta(hours=24)]
+            if target_utc + pd.Timedelta(hours=24) in data.index
+            else None
+        )
+        oracle_temperature = (
+            float(oracle_row.temperature) if oracle_row is not None else float("nan")
+        )
+        forecast_series = data.attrs.get("fingrid")
+        fingrid_value = (
+            float(forecast_series.get(target_utc, float("nan")))
+            if forecast_series is not None
+            else float("nan")
+        )
         rows.append(
             {
                 "hour_utc": target_utc,
                 "target": calendar.target,
                 "seasonal_week": data.loc[previous_week].target,
+                "consumption_lag_48h": data.loc[lag_48_time].target,
                 "origin_mean_24h": recent.mean(),
+                "origin_mean_168h": origin_mean_168,
                 "hour": calendar.hour,
                 "weekday": calendar.weekday,
                 "month": calendar.month,
                 "holiday": int(calendar.holiday),
                 "temperature": temperature,
+                "heating_degree_hours": max(0.0, 18.0 - temperature),
+                "oracle_temperature": oracle_temperature,
+                "oracle_heating_degree_hours": max(0.0, 18.0 - oracle_temperature),
+                "fingrid_forecast": fingrid_value,
             }
         )
     return pd.DataFrame(rows)
@@ -100,7 +150,7 @@ def build_examples(data: pd.DataFrame, first: date, last: date) -> pd.DataFrame:
 
 
 def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path:
-    """Train before a 12-month holdout and score 10:00 next-day forecasts."""
+    """Train before a 12-month holdout and score 13:00 next-day forecasts."""
     data = load_data(db_path)
     latest = data.index.max().date()
     test_first = latest - timedelta(days=365)
@@ -117,18 +167,33 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
     scored = build_examples(data, test_first, latest - timedelta(days=1))
     scored = scored.dropna(subset=FEATURES + ["target"]).copy()
     scored["model"] = model.predict(scored[FEATURES])
+    oracle_training = training.dropna(subset=ORACLE_FEATURES + ["target"])
+    oracle = LGBMRegressor(
+        n_estimators=250, learning_rate=0.04, num_leaves=31, verbosity=-1
+    )
+    oracle.fit(oracle_training[ORACLE_FEATURES], oracle_training.target)
+    scored["oracle_upper_bound"] = float("nan")
+    oracle_valid = scored[ORACLE_FEATURES].notna().all(axis=1)
+    scored.loc[oracle_valid, "oracle_upper_bound"] = oracle.predict(
+        scored.loc[oracle_valid, ORACLE_FEATURES]
+    )
     scored["seasonal_naive"] = scored.seasonal_week
-    scored["fingrid_forecast"] = float("nan")
-    # Dataset 165 is populated below when its versioned raw table has been ingested.
-    with duckdb.connect(str(db_path), read_only=True) as con:
-        if con.execute(
-            "select count(*) from information_schema.tables "
-            "where table_name = 'fingrid_165'"
-        ).fetchone()[0]:
-            raw = con.execute("select start_time, value from raw.fingrid_165").df()
-            raw["hour_utc"] = pd.to_datetime(raw.start_time, utc=True).dt.floor("h")
-            hourly = raw.groupby("hour_utc").value.mean()
-            scored["fingrid_forecast"] = scored.hour_utc.map(hourly)
+    correction_features = [*FEATURES, "fingrid_forecast"]
+    correction_train = training.dropna(subset=correction_features + ["target"]).copy()
+    scored["fingrid_corrected"] = float("nan")
+    if len(correction_train) >= 72:
+        correction = make_pipeline(StandardScaler(), Ridge(alpha=50.0))
+        correction_train["fingrid_error"] = (
+            correction_train.target - correction_train.fingrid_forecast
+        )
+        correction.fit(
+            correction_train[correction_features], correction_train.fingrid_error
+        )
+        available = scored.dropna(subset=correction_features)
+        scored.loc[available.index, "fingrid_corrected"] = (
+            available.fingrid_forecast
+            + correction.predict(available[correction_features])
+        )
     with duckdb.connect(str(db_path)) as con:
         con.execute("""create table if not exists forecast_predictions (
             forecast_origin_utc timestamptz not null, target_hour_utc timestamptz not null,
@@ -163,6 +228,7 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
                 "training_examples": len(training),
                 "holdout_days": 365,
                 "issue_time": "13:00 Europe/Helsinki",
+                "fingrid_error_training_rows": len(correction_train),
             }
         )
         mlflow.lightgbm.log_model(model, "model")
@@ -180,7 +246,16 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         )
         mlflow.log_artifact(str(report_dir / "feature_importance.png"))
         plt.close(ax.get_figure())
-        for name in ["model", "seasonal_naive", "fingrid_forecast"]:
+        mlflow.lightgbm.log_model(oracle, "oracle_upper_bound_model")
+        if len(correction_train) >= 72:
+            mlflow.sklearn.log_model(correction, "fingrid_error_correction_model")
+        for name in [
+            "model",
+            "oracle_upper_bound",
+            "seasonal_naive",
+            "fingrid_forecast",
+            "fingrid_corrected",
+        ]:
             valid = scored.dropna(subset=[name])
             if valid.empty:
                 continue
@@ -216,8 +291,15 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         "| Model | MAE (MWh/h) | RMSE | MAPE |",
         "|---|---:|---:|---:|",
     ]
+    display_names = {
+        "model": "leakage-safe LightGBM",
+        "oracle_upper_bound": "actual-weather oracle (upper-bound scenario)",
+        "seasonal_naive": "seasonal naive",
+        "fingrid_forecast": "Fingrid published forecast",
+        "fingrid_corrected": "Fingrid residual correction",
+    }
     lines.extend(
-        f"| {name} | {mae:.1f} | {rmse:.1f} | {mape:.2f}% |"
+        f"| {display_names[name]} | {mae:.1f} | {rmse:.1f} | {mape:.2f}% |"
         for name, (mae, rmse, mape) in metrics.items()
     )
     if "fingrid_forecast" not in metrics:
@@ -230,14 +312,43 @@ def run_backtest(db_path: Path = REPO_ROOT / "data" / "gridcast.duckdb") -> Path
         )
     lines += [
         "",
-        "Each origin is 13:00 Europe/Helsinki and predicts the next local day. "
-        "Features use the prior week's same-hour load and the mean of the 24 "
-        "hours observed by issue time; no target-relative future lag or actual "
-        "future weather is used.",
+        "Each origin is 13:00 Europe/Helsinki, after Fingrid's daily 12:00 "
+        "publication, and predicts the next local day. The primary model uses "
+        "origin-safe load/calendar features and weather known at issue time. "
+        "The oracle row uses observed target-day weather as a hypothetical "
+        "upper-bound scenario; it is not a deployable forecast or a guarantee "
+        "that forecast weather alone could achieve the same score.",
+        f"Fingrid error correction is a separate Ridge residual model calibrated on {len(correction_train)} pre-holdout forecast hours; its short calibration period limits confidence.",
+        "The primary model uses consumption_lag_48h, the 168-hour mart mean "
+        "available at issue time, and heating_degree_hours alongside its existing "
+        "features. The 168-hour value is taken from the latest completed mart row "
+        "at the origin, so target-day rolling values cannot leak into the forecast.",
+        "Fingrid's published forecast remains stronger than both the primary "
+        "model and the residual correction. Fingrid can use operational inputs "
+        "and forecasting information that are not available in this project; "
+        f"the correction also has only a short {len(correction_train)}-hour "
+        "calibration history.",
+        "",
+        "The oracle-versus-primary MAE difference measures this model's response "
+        "to actual target-day weather; actual weather is not available at issue time. FMI's "
+        "open point forecast service does not retain a historical forecast archive "
+        "([FMI forecast service documentation](https://github.com/fmidev/smartmet-sofp-backend)), "
+        "so archived snapshots are saved daily for live predictions instead. "
+        "Fingrid dataset 165 is published at 12:00 the previous day "
+        "([catalogue](https://data.fingrid.fi/en/datasets/165)).",
         "",
         "| Hour | MAE |",
         "|---:|---:|",
     ]
+    if "model" in metrics and "oracle_upper_bound" in metrics:
+        main_mae = metrics["model"][0]
+        oracle_mae = metrics["oracle_upper_bound"][0]
+        change = (main_mae - oracle_mae) / main_mae * 100
+        lines.insert(
+            lines.index("| Hour | MAE |"),
+            f"The actual-weather oracle scenario reduced MAE by {change:.1f}% "
+            f"({main_mae:.1f} to {oracle_mae:.1f} MWh/h) in this holdout.",
+        )
     lines.extend(
         f"| {hour} | {error:.1f} |"
         for hour, error in scored.assign(error=abs(scored.target - scored.model))

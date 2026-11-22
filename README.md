@@ -1,16 +1,20 @@
 # Finland Grid Forecast
 
-An end-to-end project for forecasting Finland's hourly electricity consumption. The live dashboard and measured forecast results are planned for later milestones and are not available yet.
+An end-to-end project for forecasting Finland's hourly electricity consumption with Fingrid and FMI open data. The API and dashboard are available locally; measured results below come from a 12-month holdout.
 
 ## Results
 
-No forecast has been evaluated yet; results will be reported after the backtesting milestone.
+12-month holdout beginning 2025-11-20 (hourly targets; 13:00 Helsinki forecast origins).
 
 | Model | MAE | RMSE | MAPE |
 |---|---:|---:|---:|
-| Forecast model | — | — | — |
-| Seasonal naive | — | — | — |
-| Fingrid published forecast | — | — | — |
+| Leakage-safe LightGBM | 486.9 | 665.3 | 4.58% |
+| Seasonal naive | 681.7 | 915.5 | 6.57% |
+| Fingrid published forecast | **327.3** | **425.3** | **3.24%** |
+| Actual-weather oracle scenario (upper bound) | 421.7 | 551.7 | 4.05% |
+| Fingrid residual correction (separate experiment) | 388.8 | 485.4 | 3.85% |
+
+Fingrid remains more accurate. The oracle uses actual target-day weather and is not deployable; it shows a 13.4% MAE reduction in this upper-bound scenario. Actual weather is not a guarantee of forecast-weather performance. The correction experiment still trails Fingrid and was calibrated on only 122 pre-holdout hours. See [the full backtest](reports/backtest.md) for methodology, error breakdowns, and limitations.
 
 ## M1 ingestion snapshot
 
@@ -72,9 +76,10 @@ The local pre-commit hooks use the same Ruff checks. Install them with `pre-comm
 - All stored timestamps are timezone-aware UTC timestamps. Helsinki time is reserved for calendar features and display work in later milestones.
 - Fingrid dataset 124 is the official consumption dataset. Its API coverage is recorded separately from returned measurements so empty periods are not repeatedly downloaded.
 - FMI observations use the official `fmi::observations::weather::timevaluepair` WFS stored query with hourly `t2m` observations for Helsinki, Tampere, Turku, Oulu, and Jyväskylä. Requests cover one week (the service limit) and ask for all five places together.
-- M3 uses hourly origin-safe examples: each 13:00 Helsinki origin predicts the following local day using the prior week's same-hour consumption, the 24-hour consumption average known at issue time, target calendar fields, and only temperature observed by issue time. Target-relative rolling features are not used for the 24-hour forecast because late forecast hours would expose future observations. The 13:00 issue time follows Fingrid's daily forecast publication.
+- M3 uses hourly origin-safe examples: each 13:00 Helsinki origin predicts the following local day using the prior week's same-hour consumption, the 48-hour lag, 24- and 168-hour consumption means known at issue time, target calendar fields, and weather information available at issue time. Target-relative rolling features are not used for the 24-hour forecast because late forecast hours would expose future observations. The 13:00 issue time follows Fingrid's daily forecast publication.
 - Fingrid's official next-day consumption forecast is dataset 165 (catalogue: https://data.fingrid.fi/en/datasets/165). The backtest compares forecast rows aligned by UTC delivery hour.
-- The frozen 12-month holdout (2025-11-20 onward) reported 470.2 MAE / 636.4 RMSE / 4.45% MAPE for LightGBM, 681.7 / 915.5 / 6.57% for seasonal naive, and 327.3 / 425.3 / 3.24% for Fingrid. Fingrid outperformed this first model; no claim is made that the model beats Fingrid. See `reports/backtest.md` for per-hour and per-month errors and plots.
+- FMI does not retain an archive of past forecast runs. The daily `fmi-forecast.yml` job saves forecast vintages; `make forecast-weather` runs the same snapshot job locally. The API reads the latest saved FMI forecast for target hours when it is present, and otherwise uses issue-time observations. The job writes to `GRIDCAST_DATABASE_PATH` (default `data/gridcast.duckdb`), which must be the database shared with the API for the API to use those snapshots.
+- Fingrid's dataset 165 is published daily at 12:00 Helsinki time for the next day, so M3's 13:00 origin can compare against it and train a separate error-correction experiment. The correction did not beat Fingrid in this holdout. See `reports/backtest.md` for measured results and limits.
 
 ## M4 API and dashboard
 

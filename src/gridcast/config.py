@@ -26,6 +26,11 @@ FINGRID_MIN_REQUEST_INTERVAL_SECONDS = 2.0
 # https://en.ilmatieteenlaitos.fi/open-data-manual-wfs-examples-and-guidelines
 FMI_WFS_URL = "http://opendata.fmi.fi/wfs"
 FMI_WEATHER_STORED_QUERY = "fmi::observations::weather::timevaluepair"
+# FMI's forecast point timevaluepair query and its temperature parameter are
+# listed in the official WFS time-series manual:
+# https://en.ilmatieteenlaitos.fi/open-data-manual-wfs-examples-and-guidelines
+FMI_FORECAST_STORED_QUERY = "fmi::forecast::harmonie::surface::point::timevaluepair"
+FMI_FORECAST_TEMPERATURE_PARAMETER = "temperature"
 FMI_TEMPERATURE_PARAMETER = "t2m"
 FMI_HOURLY_TIMESTEP_MINUTES = 60
 FMI_PLACES = ("helsinki", "tampere", "turku", "oulu", "jyvaskyla")
