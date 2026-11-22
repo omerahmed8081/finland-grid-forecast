@@ -1,0 +1,9 @@
+- Work on **one milestone at a time**. Before writing code, write a short plan for the milestone and the files you will change.
+- Keep functions small and typed; use type hints everywhere. Run `ruff` and `pytest` before declaring a task done.
+- Tests must **not** call real APIs; mock HTTP responses with saved fixtures.
+- Never commit secrets, `.env`, or the DuckDB file. Never print API keys in logs.
+- Use UTC internally; convert to `Europe/Helsinki` only for calendar features and display.
+- Prevent data leakage: every feature must be computable at forecast time. If unsure, ask or document the assumption.
+- Do not invent dataset IDs, API endpoints or stored-query names: check them in the official docs/catalogue, and put them in `config.py` with a comment linking to the source.
+- Prefer simple, readable solutions over clever ones. No new dependencies outside the stack in section 5 without a stated reason.
+- After each milestone, update the README section for it and write a clear commit message explaining *why*.
