@@ -12,9 +12,9 @@ Day-ahead forecasting for Finland’s hourly electricity consumption using Fingr
 |---|---:|---:|---:|
 | Leakage-safe LightGBM | 486.9 | 665.3 | 4.58% |
 | Seasonal naive | 681.7 | 915.5 | 6.57% |
-| Fingrid published forecast | **327.3** | **425.3** | **3.24%** |
+| Fingrid published forecast | 327.3 | 425.3 | 3.24% |
 | Actual-weather oracle scenario (upper bound) | 421.7 | 551.7 | 4.05% |
-| Fingrid residual correction (separate experiment) | 317.7 | 411.6 | 3.17% |
+| **Fingrid residual correction (separate experiment)** | **317.7** | **411.6** | **3.17%** |
 
 The leakage-safe LightGBM remains behind raw Fingrid: it uses load history, calendar values, and only weather available at issue time, while Fingrid uses its own weather forecasts and operational forecasting process. The separate residual correction did not worsen MAE, RMSE, or MAPE on the final six-month pre-holdout validation window (229.4 / 292.7 / 2.59% raw vs. 223.4 / 285.2 / 2.54% corrected). On the frozen holdout it scored 317.7 / 411.6 / 3.17%, compared with raw Fingrid’s 327.3 / 425.3 / 3.24%; this gain is not a guarantee of future improvement. The oracle uses actual target-day weather and is not deployable; its 13.4% MAE reduction is an upper-bound scenario, not a promise of forecast-weather performance. See [the full backtest](reports/backtest.md) for methodology, validation results, error breakdowns, and limits.
 
