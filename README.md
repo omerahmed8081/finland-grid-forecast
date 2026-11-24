@@ -1,6 +1,8 @@
 # Finland Grid Forecast
 
-An end-to-end project for forecasting Finland's hourly electricity consumption with Fingrid and FMI open data. The API and dashboard are available locally; measured results below come from a 12-month holdout.
+Day-ahead forecasting for Finland’s hourly electricity consumption using Fingrid and FMI open data. **Dashboard:** not publicly deployed yet; [view the screenshot](reports/dashboard.png) or run it locally using the instructions below.
+
+![Finland Grid Forecast dashboard showing consumption and model forecasts over the last 30 days](reports/dashboard.png)
 
 ## Results
 
@@ -14,82 +16,75 @@ An end-to-end project for forecasting Finland's hourly electricity consumption w
 | Actual-weather oracle scenario (upper bound) | 421.7 | 551.7 | 4.05% |
 | Fingrid residual correction (separate experiment) | 317.7 | 411.6 | 3.17% |
 
-The leakage-safe LightGBM remains behind raw Fingrid: its input set uses load history, calendar values, and only weather available at issue time, while Fingrid uses its own weather forecasts and operational forecasting process. A separate residual correction was trained using dataset 165 history and selected on the final six pre-holdout months. It did not worsen MAE, RMSE, or MAPE on that validation window (229.4 / 292.7 / 2.59% raw vs. 223.4 / 285.2 / 2.54% corrected) and scored 317.7 / 411.6 / 3.17% on the frozen holdout, compared with raw Fingrid's 327.3 / 425.3 / 3.24%. This holdout gain is not a guarantee of future improvement. The oracle uses actual target-day weather and is not deployable; it shows a 13.4% MAE reduction in this upper-bound scenario. See [the full backtest](reports/backtest.md) for methodology, error breakdowns, and limitations.
+The leakage-safe LightGBM remains behind raw Fingrid: it uses load history, calendar values, and only weather available at issue time, while Fingrid uses its own weather forecasts and operational forecasting process. The separate residual correction did not worsen MAE, RMSE, or MAPE on the final six-month pre-holdout validation window (229.4 / 292.7 / 2.59% raw vs. 223.4 / 285.2 / 2.54% corrected). On the frozen holdout it scored 317.7 / 411.6 / 3.17%, compared with raw Fingrid’s 327.3 / 425.3 / 3.24%; this gain is not a guarantee of future improvement. The oracle uses actual target-day weather and is not deployable; its 13.4% MAE reduction is an upper-bound scenario, not a promise of forecast-weather performance. See [the full backtest](reports/backtest.md) for methodology, validation results, error breakdowns, and limits.
 
-## M1 ingestion snapshot
-
-The backfill covers 2023-11-20 19:00 UTC through 2026-11-20 19:00 UTC. DuckDB contains 104,831 Fingrid consumption records and 26,305 hourly FMI observations for each of the five configured places. An immediate repeat reported zero newly downloaded Fingrid pages and FMI responses.
-
-## M1 architecture
+## Architecture
 
 ```mermaid
 flowchart LR
-    Fingrid["Fingrid dataset 124"] --> Ingest["Incremental ingestion"]
-    FMI["FMI hourly observations"] --> Ingest
-    Ingest --> DuckDB["DuckDB raw schema"]
+    FG124["Fingrid consumption<br/>dataset 124"] --> ING["Incremental ingestion<br/>and raw cache"]
+    FG165["Fingrid day-ahead forecast<br/>dataset 165"] --> ING
+    FMI["FMI observations<br/>and forecast snapshots"] --> ING
+    ING --> RAW["DuckDB raw tables"]
+    RAW --> DBT["dbt staging<br/>and feature mart"]
+    DBT --> MODEL["Leakage-safe LightGBM<br/>and baselines"]
+    MODEL --> MLFLOW["MLflow<br/>metrics and artifacts"]
+    MODEL --> API["FastAPI"]
+    MODEL --> DASH["Streamlit dashboard"]
+    API --> DB["DuckDB predictions"]
+    DASH --> DB
 ```
 
-## M2 transformations
+## Run it
 
-The dbt project cleans and deduplicates the Fingrid 15-minute rows, rolls them
-up to UTC hours, stages FMI observations, and builds `marts.features`. The mart
-includes consumption lags (24, 48, and 168 hours), trailing 24- and 168-hour
-means, Helsinki calendar fields, Finnish public holidays, population-weighted
-temperature observed 24 hours before each feature hour, and heating degree
-hours. The weather lag is available at forecast time and avoids using future
-observations. Population weights use Statistics Finland's 2025 municipal
-population counts. Finnish holidays are generated through 2040 by the `holidays`
-package when transforms run.
-
-Fingrid dataset 165 is now backfilled over the consumption history's three-year start: 134,625 records from 2023-11-20 19:00 UTC through 2026-11-22 17:15 UTC. The dataset is five-minute resolution before 2024-04-21 and 15-minute afterward. The backtest's residual correction uses all aligned pre-holdout history, with its scale chosen on a separate six-month validation window.
-
-The raw history contains one missing consumption hour (2024-06-03 08:00 UTC).
-The feature mart carries forward the last known target for that one hour and
-sets `consumption_imputed` so downstream work can identify it. No future value
-is used for this fill. The DST feature identifies Helsinki's UTC+3 hours; all
-model timestamps remain UTC.
-
-Run `make transform` to generate the dbt seeds and build the staging and mart
-models. Run `dbt test --project-dir dbt --profiles-dir dbt` for the data checks.
-Set `GRIDCAST_DATABASE_PATH` to override the default `data/gridcast.duckdb`.
-
-## Run ingestion
-
-Use Python 3.11 or newer. Install the project and development tools, then copy `.env.example` to `.env` and set `FINGRID_API_KEY` to a registered Fingrid Open Data API key.
+Use Python 3.11 or newer. Install the project and development tools, then create `.env` from the example and add your Fingrid Open Data API key:
 
 ```sh
 make install
-make ingest
+cp .env.example .env
 ```
 
-`make ingest` backfills at least three years of consumption and hourly weather observations into `data/gridcast.duckdb`. Raw HTTP responses are cached under `data/raw_cache`. A later run requests only time ranges that are not already recorded as successfully ingested. Fingrid requests use the `x-api-key` header and are paced to the API's published rate limit.
+Set this value in `.env`:
 
-Useful checks:
+```dotenv
+FINGRID_API_KEY=your-fingrid-api-key-here
+```
+
+The key is sent in the `x-api-key` request header. Do not commit `.env`.
+
+Common commands:
 
 ```sh
-make lint
-make test
+make ingest            # ingest Fingrid consumption and FMI observations
+make forecast-weather  # save an FMI next-day forecast snapshot
+make transform         # build dbt models and marts.features
+make train             # train the saved model
+make backtest          # write reports/backtest.md and plots
+make serve             # run the FastAPI service
+make dashboard         # run the Streamlit dashboard
+make lint              # run Ruff checks and formatting checks
+make test              # run pytest
 ```
 
-The local pre-commit hooks use the same Ruff checks. Install them with `pre-commit install` after `make install`.
+Run both services with Docker after creating `.env`:
 
-## Design decisions and current limits
+```sh
+docker compose up --build
+```
 
-- All stored timestamps are timezone-aware UTC timestamps. Helsinki time is reserved for calendar features and display work in later milestones.
-- Fingrid dataset 124 is the official consumption dataset. Its API coverage is recorded separately from returned measurements so empty periods are not repeatedly downloaded.
-- FMI observations use the official `fmi::observations::weather::timevaluepair` WFS stored query with hourly `t2m` observations for Helsinki, Tampere, Turku, Oulu, and Jyväskylä. Requests cover one week (the service limit) and ask for all five places together.
-- M3 uses hourly origin-safe examples: each 13:00 Helsinki origin predicts the following local day using the prior week's same-hour consumption, the 48-hour lag, 24- and 168-hour consumption means known at issue time, target calendar fields, and weather information available at issue time. Target-relative rolling features are not used for the 24-hour forecast because late forecast hours would expose future observations. The 13:00 issue time follows Fingrid's daily forecast publication.
-- Fingrid's official next-day consumption forecast is dataset 165 (catalogue: https://data.fingrid.fi/en/datasets/165). The backtest compares forecast rows aligned by UTC delivery hour.
-- FMI does not retain an archive of past forecast runs. The daily `fmi-forecast.yml` job saves forecast vintages; `make forecast-weather` runs the same snapshot job locally. The API reads the latest saved FMI forecast for target hours when it is present, and otherwise uses issue-time observations. The job writes to `GRIDCAST_DATABASE_PATH` (default `data/gridcast.duckdb`), which must be the database shared with the API for the API to use those snapshots.
-- Fingrid's dataset 165 is published daily at 12:00 Helsinki time for the next day, so M3's 13:00 origin can compare against it and train a separate error-correction experiment. The validation-selected correction was no worse on MAE, RMSE, or MAPE in validation and beat raw Fingrid on this holdout; the leakage-safe LightGBM did not. See `reports/backtest.md` for measured results and limits.
+The API is available at `http://localhost:8000`, and the dashboard at `http://localhost:8501`. Docker mounts the local `data/` directory into both services. For local runs, set `GRIDCAST_DATABASE_PATH` to use a different DuckDB file.
 
-## M4 API and dashboard
+For a populated local warehouse, run `make ingest`, `make transform`, and `make train` before starting the services.
 
-Run `make serve` for the FastAPI service (`/health`, `/forecast?date=YYYY-MM-DD`, `/metrics`) and `make dashboard` for Streamlit. The dashboard's Generate button and the API's next-day forecast endpoint use the saved M3 model. Both read and write `forecast_predictions` in the same DuckDB file; set `GRIDCAST_DATABASE_PATH` to change it. Forecast request dates are Helsinki calendar dates, while returned timestamps and stored keys are UTC.
+## Design decisions and what didn’t work
 
-Run `make train` once to create the model artifact, then start both services with `docker compose up --build`; the local `data/` directory is mounted into both containers. Set `FINGRID_API_KEY` in `.env` for forecast comparison refreshes. The dashboard compares tomorrow's model forecast with Fingrid's dataset 165, plots the last 30 days of actual and stored forecast values, and reports rolling MAE/MAPE when matching predictions exist. It credits Fingrid and FMI on the page.
+- Store timestamps in UTC and convert to Europe/Helsinki for calendar features and display. Forecast examples use only information available at the 13:00 Helsinki issue time; future target-relative rolling values are excluded.
+- The consumption backfill spans 2023-11-20 19:00 UTC through 2026-11-20 19:00 UTC and contains 104,831 Fingrid rows and 26,305 hourly FMI observations for each of five places; an immediate repeat downloaded zero new pages or FMI responses. Dataset 165 contributes 134,625 records from 2023-11-20 19:00 UTC through 2026-11-22 17:15 UTC; its resolution is five minutes before 2024-04-21 and 15 minutes afterward.
+- Population weights use Statistics Finland’s 2025 municipal counts, and Finnish holidays are generated through 2040. The dashboard compares tomorrow’s model forecast with Fingrid’s dataset 165, charts the last 30 days, and reports rolling MAE/MAPE when matching predictions exist.
+- One consumption hour is missing (2024-06-03 08:00 UTC). The feature mart carries forward the last known target and marks it with `consumption_imputed`; it does not use a future value.
+- The leakage-safe LightGBM did not beat Fingrid. Fingrid publishes its next-day dataset 165 forecast at 12:00, ahead of this model’s 13:00 issue time. FMI does not retain a historical forecast archive, so daily forecast snapshots are saved for future live predictions. The actual-weather oracle is an upper-bound scenario, not an available forecast input.
 
 ## Data credits
 
-- Fingrid Open Data, electricity consumption dataset 124, licensed under CC BY 4.0. Source: [Fingrid Open Data](https://data.fingrid.fi/en/datasets/124).
-- Finnish Meteorological Institute (FMI) Open Data weather observations. Source: [FMI Open Data WFS manual](https://en.ilmatieteenlaitos.fi/open-data-manual-fmi-wfs-services).
+- Fingrid Open Data, electricity consumption dataset 124 and forecast dataset 165. Fingrid data is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Sources: [dataset 124](https://data.fingrid.fi/en/datasets/124), [dataset 165](https://data.fingrid.fi/en/datasets/165).
+- Finnish Meteorological Institute Open Data observations and forecasts: [FMI Open Data WFS manual](https://en.ilmatieteenlaitos.fi/open-data-manual-fmi-wfs-services).
